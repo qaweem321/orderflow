@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: .NET build, format, migrations, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-dotnet@v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore
+      - run: dotnet tool restore
+      - name: Code style (dotnet format)
+        run: dotnet format --verify-no-changes --no-restore
+      - name: Build (warnings and vulnerable packages fail it)
+        run: dotnet build -c Release --no-restore
+      - name: Migrations match the models
+        run: |
+          for project in src/Services/Catalog/Catalog.Api src/Services/Ordering/Ordering.Api src/Gateway/Gateway.Api; do
+            dotnet ef migrations has-pending-model-changes -p "$project" -s "$project" --no-build --configuration Release
+          done
+      - name: Unit tests
+        run: dotnet test --project tests/OrderFlow.UnitTests -c Release --no-build
+      - name: Integration tests (SQL Server + RabbitMQ via Testcontainers)
+        run: dotnet test --project tests/OrderFlow.IntegrationTests -c Release --no-build
+
+  frontend:
+    name: Angular build and tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npx ng build
+      - run: npm test
+
+  docker:
+    name: Docker images and Compose file
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Compose file is valid
+        run: MSSQL_SA_PASSWORD=x RABBITMQ_PASSWORD=x JWT_SIGNING_KEY=x docker compose config --quiet
+      - name: Build every image
+        run: MSSQL_SA_PASSWORD=x RABBITMQ_PASSWORD=x JWT_SIGNING_KEY=x docker compose build
+
+  commits:
+    name: Commit messages follow Conventional Commits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Check the commits of this pull request or push
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            npx commitlint --from "$PR_BASE" --to "$PR_HEAD" --verbose
+          elif [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            npx commitlint --last --verbose   # first push of a branch: no "before" commit to compare with
+          else
+            npx commitlint --from "$PUSH_BEFORE" --to "$GITHUB_SHA" --verbose
+          fi

@@ -1,0 +1,97 @@
+# Full stack: SQL Server, RabbitMQ, Catalog, Ordering, Gateway and the Angular app.
+# Start with `docker compose up -d --build`, then open http://localhost:4300
+name: orderflow
+
+x-dotnet: &dotnet
+  build:
+    context: .
+  restart: unless-stopped
+  depends_on:
+    sqlserver: { condition: service_healthy }
+    rabbitmq: { condition: service_healthy }
+  networks: [orderflow]
+
+x-common-env: &common-env
+  Database__MigrateOnStartup: "true"
+  Jwt__SigningKey: ${JWT_SIGNING_KEY:?Set JWT_SIGNING_KEY in .env (see .env.example)}
+  RabbitMq__ConnectionString: amqp://orderflow:${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}@rabbitmq:5672
+
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2025-CU9-GDR1-ubuntu-24.04
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?Set MSSQL_SA_PASSWORD in .env (see .env.example)}
+    volumes: [sqlserver-data:/var/opt/mssql]
+    networks: [orderflow]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' -b -o /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  rabbitmq:
+    image: rabbitmq:4.3.6-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: orderflow
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}
+    ports: ["127.0.0.1:15672:15672"] # management UI, local only
+    volumes: [rabbitmq-data:/var/lib/rabbitmq]
+    networks: [orderflow]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  catalog:
+    <<: *dotnet
+    build: { context: ., args: { PROJECT: src/Services/Catalog/Catalog.Api/Catalog.Api.csproj } }
+    command: ["Catalog.Api.dll"]
+    environment:
+      <<: *common-env
+      ConnectionStrings__Default: Server=sqlserver,1433;Database=OrderFlowCatalog;User Id=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True
+      Seed__DemoData: "true"
+
+  ordering:
+    <<: *dotnet
+    build: { context: ., args: { PROJECT: src/Services/Ordering/Ordering.Api/Ordering.Api.csproj } }
+    command: ["Ordering.Api.dll"]
+    environment:
+      <<: *common-env
+      ConnectionStrings__Default: Server=sqlserver,1433;Database=OrderFlowOrdering;User Id=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True
+      Services__Catalog: http://catalog:8080
+
+  gateway:
+    <<: *dotnet
+    build: { context: ., args: { PROJECT: src/Gateway/Gateway.Api/Gateway.Api.csproj } }
+    command: ["Gateway.Api.dll"]
+    environment:
+      Database__MigrateOnStartup: "true"
+      Jwt__SigningKey: ${JWT_SIGNING_KEY}
+      ConnectionStrings__Default: Server=sqlserver,1433;Database=OrderFlowIdentity;User Id=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True
+      Seed__DemoUsers: "true"
+      ReverseProxy__Clusters__catalog__Destinations__main__Address: http://catalog:8080
+      ReverseProxy__Clusters__ordering__Destinations__main__Address: http://ordering:8080
+      ReverseProxyNetworks__0: 172.28.0.0/24 # trust X-Forwarded-For only from the web container's network
+    depends_on:
+      sqlserver: { condition: service_healthy }
+    ports: ["127.0.0.1:5100:8080"] # API + /docs, local only
+
+  web:
+    build: ./web
+    restart: unless-stopped
+    depends_on: [gateway]
+    ports: ["127.0.0.1:4300:80"]
+    networks: [orderflow]
+
+networks:
+  orderflow:
+    ipam:
+      config: [{ subnet: 172.28.0.0/24 }]
+
+volumes:
+  sqlserver-data:
+  rabbitmq-data:
