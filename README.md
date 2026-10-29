@@ -101,9 +101,28 @@ docker run -d --name orderflow-sql -e ACCEPT_EULA=Y -e 'MSSQL_SA_PASSWORD=OrderF
 docker run -d --name orderflow-rabbit -e RABBITMQ_DEFAULT_USER=orderflow -e RABBITMQ_DEFAULT_PASS=orderflow-dev -p 127.0.0.1:5672:5672 -p 127.0.0.1:15672:15672 rabbitmq:4.3.6-management-alpine
 ```
 
-Then run each in its own terminal: `dotnet run --project src/Services/Catalog/Catalog.Api` (port 5101),
-`dotnet run --project src/Services/Ordering/Ordering.Api` (5102), `dotnet run --project src/Gateway/Gateway.Api`
-(5100), and the front end:
+Build once (three `dotnet run` builds at the same time collide on the shared projects):
+
+```bash
+dotnet build
+```
+
+Then start each service in its own terminal, without rebuilding:
+
+```bash
+dotnet run --no-build --project src/Services/Catalog/Catalog.Api
+```
+
+```bash
+dotnet run --no-build --project src/Services/Ordering/Ordering.Api
+```
+
+```bash
+dotnet run --no-build --project src/Gateway/Gateway.Api
+```
+
+They listen on ports 5101, 5102 and 5100, and create their databases, the demo catalog and the demo logins on
+first start. Then the front end:
 
 ```bash
 cd web && npm ci && npm start
